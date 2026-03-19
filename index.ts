@@ -75,7 +75,7 @@ bot.action("generate_wallet", async (ctx) => {
       0.5 * LAMPORTS_PER_SOL,
     );
 
-    await connection.confirmTransaction(airdropSignature, "confirmed");
+    await connection.confirmTransaction(airdropSignature, "finalized");
 
     const balance = await connection.getBalance(user.publicKey);
 
@@ -84,7 +84,7 @@ bot.action("generate_wallet", async (ctx) => {
         "🪙 Airdropped <code>0.5 SOL</code> to your wallet\n\n" +
         "📍 <b>Public Key:</b>\n" +
         `<code>${keypair.publicKey.toBase58()}</code>\n\n` +
-        `Your current balance is: <code>${balance}</code>\n\n` +
+        `Your current balance is: <code>${balance / LAMPORTS_PER_SOL} SOL</code>\n\n` +
         "Keep your private key safe!",
       {
         parse_mode: "HTML",
@@ -167,8 +167,10 @@ bot.on(message("text"), async (ctx) => {
         return await ctx.reply("Please enter a valid transferable amount");
       }
 
-      if (amount > balance) {
-        return await ctx.reply("Insufficient balance");
+      const feeBuffer = 5000; // ~0.000005 SOL
+
+      if (amount * LAMPORTS_PER_SOL + feeBuffer > balance) {
+        return await ctx.reply("Insufficient balance (including fees)");
       }
 
       const toAddress = request.to;
@@ -180,6 +182,12 @@ bot.on(message("text"), async (ctx) => {
       const toPubkey =
         typeof toAddress === "string" ? new PublicKey(toAddress) : toAddress;
 
+      const toAccountInfo = await connection.getAccountInfo(toPubkey);
+
+      if (!toAccountInfo) {
+        return ctx.reply("❌ Recipient account does not exist on-chain");
+      }
+
       // Create Tx and forward it to Blockchain
       try {
         const ix = SystemProgram.transfer({
@@ -190,23 +198,27 @@ bot.on(message("text"), async (ctx) => {
 
         const tx = new Transaction().add(ix);
 
-        const { blockhash } = await connection.getLatestBlockhash();
-        tx.recentBlockhash = blockhash;
+        const latestBlockhash = await connection.getLatestBlockhash();
+        tx.recentBlockhash = latestBlockhash.blockhash;
         tx.feePayer = user.publicKey;
         tx.sign(user);
 
         const signature = await connection.sendRawTransaction(tx.serialize());
 
-        await connection.confirmTransaction(signature, "confirmed");
-
-        await ctx.reply(
-          `✅ Sent <code>${amount} SOL</code> to <code>${toPubkey}</code> successfully`,
+        const confirmation = await connection.confirmTransaction(
           {
-            parse_mode: "HTML",
+            signature,
+            blockhash: latestBlockhash.blockhash,
+            lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
           },
+          "finalized",
         );
 
-        await ctx.editMessageText(
+        if (confirmation.value.err) {
+          throw new Error("Transaction failed");
+        }
+
+        await ctx.reply(
           `✅ Sent <code>${amount} SOL</code> to <code>${toPubkey}</code> successfully`,
           {
             parse_mode: "HTML",
@@ -233,6 +245,7 @@ bot.on(message("text"), async (ctx) => {
           },
         );
       } catch (error) {
+        console.error("TX ERROR:", error);
         await ctx.reply("❌ Transaction failed");
       }
 

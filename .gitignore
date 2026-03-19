@@ -1,6 +1,9 @@
 # dependencies (bun install)
 node_modules
 
+# Solana local validator
+test-ledger/
+
 # output
 out
 dist
